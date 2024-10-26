@@ -7,11 +7,13 @@ LISTEN_SIZE = 5
 SERVER_IP = 'localhost'
 SERVER_PORT = 12345
 NUM_OF_NUMS = 1000  # per core
-HASH_TO_DECRYPT = '827ccb0eea8a706c4c34a16891f84e7b'
+HASH_TO_DECRYPT = 'a4ff94d8b38039a7db3d26437e7079ef'
 START_NUM = 10000
 RANGES = set()  # Store which ranges have been tried
 TARGET_MD5 = HASH_TO_DECRYPT.lower()  # make sure hash is all lowercase letters
-UNASSIGNED_RANGES = []  # Store ranges that need reassignment
+# global variables
+unassigned_ranges = []  # Store ranges that need reassignment
+client_sockets = []
 
 
 def handle_client(server_socket, addr, range_lock):
@@ -22,14 +24,13 @@ def handle_client(server_socket, addr, range_lock):
     :param addr: client address information
     :return:
     """
+    global unassigned_ranges
     logging.info(f"Client {addr} connected.")
     protocol.protocol_send(TARGET_MD5, "MD5", server_socket)
-    # num_cores = int(server_socket.recv(1024).decode())
     msg_type, num_cores = protocol.protocol_receive(server_socket)
     if msg_type != "COR":
         logging.error(f"Expected 'COR' but received '{msg_type}' from client {addr}. Disconnecting.")
         protocol.protocol_send("ERROR: Expected COR", "ERR", server_socket)
-        # server_socket.send(b"ERROR: Expected COR")  # Optionally notify the client
         server_socket.close()  # Close the connection to the client
         return
 
@@ -38,9 +39,9 @@ def handle_client(server_socket, addr, range_lock):
         while True:
             workload = int(NUM_OF_NUMS) * int(num_cores)
             with range_lock:
-                if UNASSIGNED_RANGES:
+                if unassigned_ranges:
                     # Reassign an unfinished range if any are available
-                    start, end = UNASSIGNED_RANGES.pop(0)
+                    start, end = unassigned_ranges.pop(0)
                 else:
                     # Assign a new range to the client
                     start = START_NUM + len(RANGES) * workload
@@ -53,15 +54,12 @@ def handle_client(server_socket, addr, range_lock):
             # Send the range to the client
             logging.info(f"Assigning range {start}-{end} to client {addr}.")
             protocol.protocol_send(f"{start}-{end}", "RNG", server_socket)
-            # server_socket.send(f"{start}-{end}".encode())
 
             # Wait for result from client
-            # result = server_socket.recv(1024).decode()
             msg_type, result = protocol.protocol_receive(server_socket)
             if msg_type != "RES":
                 protocol.protocol_send("ERROR: Expected RES", "ERR", server_socket)
                 logging.error("Expected RES")
-                # server_socket.send(b"ERROR: Expected RES")  # Optionally notify the client
                 server_socket.close()  # Close the connection to the client
                 return
 
@@ -71,23 +69,37 @@ def handle_client(server_socket, addr, range_lock):
                 # Check if the result is valid
             if isinstance(result, str) and len(result) == len(str(START_NUM)) and result.isdigit():
                 logging.info(f"Client {addr} found valid number: {result}")
-                # Optionally send a message to the client
-                server_socket.send(b"FOUND")
+                # send a message to the client to let them disconnect
+                broadcast_message('FOUND', "RES")
                 break
             else:
-                # This block handles any result that is not a three-digit number
+                # This block handles any result that is not in the correct range
                 logging.warning(f"Client {addr} found an invalid result: {result}")
                 protocol.protocol_send("RESULT NOT VALID", "ERR", server_socket)
-                # server_socket.send(b"RESULT NOT VALID")  # Optionally notify the client
 
     except (ConnectionResetError, ValueError) as e:
         logging.warning(f"Client {addr} disconnected or error occurred: {e}")
         with range_lock:
-            UNASSIGNED_RANGES.append((start, end))  # Reassign unfinished range
+            unassigned_ranges.append((start, end))  # Reassign unfinished range
 
     finally:
         server_socket.close()
         logging.info(f"Connection with client {addr} closed.")
+
+
+def broadcast_message(message, msg_type):
+    """
+    Send message to all clients (in client_sockets)
+    :param message: message to send
+    :param msg_type: message type
+    """
+    global client_sockets
+    for client in client_sockets[:]:  # Use a copy of the list to avoid modification issues
+        try:
+            protocol.protocol_send(message, msg_type, client)
+        except Exception as e:
+            logging.error(f"Failed to send message to a client: {e}")
+            client_sockets.remove(client)  # Remove client if sending fails
 
 
 def start_server():
@@ -103,6 +115,7 @@ def start_server():
 
     while True:
         server_socket, addr = server.accept()
+        client_sockets.append(server_socket)
         client_thread = threading.Thread(target=handle_client, args=(server_socket, addr, range_lock))
         client_thread.start()
 

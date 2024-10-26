@@ -1,8 +1,10 @@
 import socket
 import hashlib
 import multiprocessing
+
 import protocol
 import logging
+import time
 
 LISTEN_SIZE = 5
 CLIENT_HOST = 'localhost'
@@ -67,22 +69,27 @@ def client_worker():
 
     while True:
         # Receive the range from the server
-        # data = client.recv(1024).decode()
         msg_type, data = protocol.protocol_receive(client)
         if msg_type == "ERR":
             logging.error("Received an error message from the server. Closing connection.")
             client.close()
             return
+
+        if msg_type == "RES":
+            logging.debug("Got result")
+            if data == "FOUND":
+                logging.info("Stopping work, answer was found by another client.")
+                break
+
         if msg_type != "RNG":
             logging.error(f"Expected 'RNG', but received '{msg_type}'. Closing connection.")
             client.close()
             return
-        if data == "STOP":
-            logging.info("Stopping work, answer was found by another client.")
-            break
 
         start, end = map(int, data.split('-'))
         logging.info(f"Client working on range: {start}-{end}")
+
+        time.sleep(1)
 
         # Brute force through the range
         result = brute_force_range(start, end, target_md5)
@@ -91,11 +98,10 @@ def client_worker():
             logging.info(f"Sending found result {result} to server.")
             protocol.protocol_send(result, "RES", client)
             # client.send(result.encode())
-            break
+            # break
         else:
             logging.debug("No result found in current range. Notifying server.")
             protocol.protocol_send("NOT FOUND", "RES", client)
-            # client.send(b"NOT FOUND")  # Notify server if no match found in range
 
     client.close()
     logging.info("Connection to the server closed.")
